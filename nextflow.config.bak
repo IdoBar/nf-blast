@@ -1,0 +1,187 @@
+// settings to run diamond/blast
+  params {
+        tracedir = "pipeline_info"
+        resdir = "nf-blast-results"
+        query = ""
+        db = "/project/aerc/ncbi/v5/nt"
+        tax_db_dir = "/project/aerc/ncbi/v5"
+        out = ""
+        chunkSize = 250
+        outfmtString = "6"
+        evalue = "1e-10"
+        targetSeqs = 50
+        blastTask = 'blastn'
+        blastOpts = ''
+        diamondOpts = ''
+      }
+
+  manifest {
+    name = 'blast-nf'
+    author = 'Ido Bar'
+    description = 'Homology search using BLAST or Diamond'
+    mainScript = 'blast-nf.nf'
+    nextflowVersion = '>=21.04.1'
+    version = '0.1.0'
+  }
+
+  env {
+        BLASTDB = "/project/aerc/ncbi/v5"
+      }
+
+  profiles {
+        
+    singularity {
+        enabled = true
+        autoMounts = true
+        runOptions = '-B /project/aerc/ncbi/v5'
+    }
+
+    conda {
+        process.conda = 'blast diamond'
+    }
+    blast_tax {
+      params {
+            query = ""
+            db = "/project/aerc/ncbi/v5/nt"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            out = ""
+            chunkSize = 250
+            outfmtString = '6 std stitle staxids sscinames scomnames sskingdoms'
+            evalue = "1e-10"
+            targetSeqs = 50
+            blastTask = 'blastn'
+        }
+    }
+    diamond_tax {
+      params {
+            query = ""
+            db = "/project/aerc/ncbi/v5/nr.dmnd"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            out = ""
+            chunkSize = "250.KB"
+            outfmtString = '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle staxids sscinames skingdoms sphylums'
+            evalue = "1e-10"
+            targetSeqs = 50
+            blastTask = 'blastpD'
+        }
+    }
+    test {
+        params {
+            query = "${launchDir}/test.fa"
+            db = "/project/aerc/ncbi/v5/nt"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            out = "test.blastn.nt.outfmt6"
+            chunkSize = 10
+            outfmtString = "6"
+            blastTask = 'blastn'
+        }
+    }
+    test_tax {
+        params {
+            query = "${launchDir}/test.fa"
+            db = "/project/aerc/ncbi/v5/nt"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            out = "test.blastn.nt.outfmt6"
+            chunkSize = 10
+            outfmtString = '6 std stitle staxids sscinames scomnames sskingdoms'
+            blastTask = 'blastn'
+        }
+    }
+    test_p {
+        params {
+            query = "test.faa"
+            db = "/project/aerc/ncbi/v5/nr"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            out = "test.blastp.nr.outfmt6"
+            chunkSize = 10
+            blastTask = 'blastp'
+        }
+    }
+    test_d {
+        params {
+            query = "test.faa"
+            db = "/project/aerc/ncbi/v5/nr"
+            tax_db_dir = "/project/aerc/ncbi/v5"
+            outfmtString = '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle staxids sscinames skingdoms sphylums'
+            out = "test.blastpD.nr.outfmt6"
+            chunkSize = 20
+            blastTask = 'blastpD'
+            diamondOpts = '--fast'
+        }
+  }
+}
+  process {
+        errorStrategy = { task.exitStatus in [143,137,104,134,139,271] ? 'retry' : 'finish' }
+        maxRetries = 4
+
+        withLabel: 'diamond' {
+          cpus = { check_max( 4 + (2* task.attempt), 'cpus' ) }
+          memory = { check_max( 14.GB + (2.GB * task.attempt), 'memory' ) }
+          time = { check_max( 2.h + (2.h* task.attempt), 'time' ) }
+          container = 'diamond_latest.sif'
+        }
+        withLabel: 'blast' {
+          cpus = { check_max( 4 + (2 * task.attempt), 'cpus' ) }
+          memory = { check_max( 6.GB + (2.GB * task.attempt), 'memory' ) }
+          time = { check_max( 4.h + (2.h * task.attempt), 'time' ) }
+          container = 'blast_latest.sif'
+        }
+        withName: 'diamond_prep_db' {
+            time = { check_max( 7.h + (3.h * task.attempt), 'time' ) }
+        }
+
+    }
+
+
+timeline {
+  enabled = true
+  file = "${params.resdir}/${params.tracedir}/${manifest.name}_${params.blastTask}_timeline.html"
+}
+report {
+  enabled = true
+  file = "${params.resdir}/${params.tracedir}/${manifest.name}_${params.blastTask}_report.html"
+}
+trace {
+  enabled = true
+  file = "${params.resdir}/${params.tracedir}/${manifest.name}_${params.blastTask}_trace.txt"
+}
+dag {
+  enabled = true
+  file = ( {nextflow.version.matches('22.04+')} ) ? "${params.resdir}/${params.tracedir}/${manifest.name}_${params.blastTask}_dag.mmd" : "${params.resdir}/${params.tracedir}/${manifest.name}_${params.blastTask}_dag.html"
+  //file = "${params.resdir}/${params.tracedir}/${workflow.manifest.name}_${params.blastTask}_dag.html"
+}
+
+
+// Function to ensure that resource requirements don't go beyond
+// a maximum limit
+def check_max(obj, type) {
+  if (type == 'memory') {
+    try {
+      if (obj.compareTo(params.max_memory as nextflow.util.MemoryUnit) == 1)
+        return params.max_memory as nextflow.util.MemoryUnit
+      else
+        return obj
+    } catch (all) {
+      println "   ### ERROR ###   Max memory '${params.max_memory}' is not valid! Using default value: $obj"
+      return obj
+    }
+  } else if (type == 'time') {
+    try {
+      if (obj.compareTo(params.max_time as nextflow.util.Duration) == 1)
+        return params.max_time as nextflow.util.Duration
+      else
+        return obj
+    } catch (all) {
+      println "   ### ERROR ###   Max time '${params.max_time}' is not valid! Using default value: $obj"
+      return obj
+    }
+  } else if (type == 'cpus') {
+    try {
+      return Math.min( obj, params.max_cpus as int )
+    } catch (all) {
+      println "   ### ERROR ###   Max cpus '${params.max_cpus}' is not valid! Using default value: $obj"
+      return obj
+    }
+  }
+}
+

@@ -1,0 +1,251 @@
+#!/usr/bin/env nextflow
+
+nextflow.enable.dsl=2 
+/*
+ * Defines the pipeline input parameters (with a default value for each one).
+ * Each of the following parameters can be specified as command line options.
+ */
+ 
+
+db_name = file(params.db).name
+// diamond_db = file(params.db).name
+// db_path = (params.blastTask =~ /D$/ && params.outfmtString =~ /staxids|sscinames|scomnames|sskingdoms/ && file("${params.db}.dmnd").exists()) ? "${params.db}.dmnd" : file(params.db).name
+db_basename = file(params.db).baseName
+db_dir = file(params.db).parent
+out_dir = "${params.resdir}/${params.blastTask}"
+// Check if the chunks are provided as Memory units and if not assume KB
+chunk_size = params.chunkSize ==~ /[0-9]+/ ? MemoryUnit.of( "${params.chunkSize}.KB" ) : MemoryUnit.of( params.chunkSize )
+// Format output filename with as "query"
+output_fmt = params.outfmtString =~ /(\d+) (.+)/
+res_name = params.out ?: "${file(params.query).baseName}.${params.blastTask}.${file(params.db).simpleName}.outfmt${output_fmt[0][1]}"
+// dag_file = (nextflow.version.matches('22.04+')) ? "${params.resdir}/${params.tracedir}/blast-nf_dag.mmd" : "${params.resdir}/${params.tracedir}/blast-nf_dag.html"
+
+ 
+workflow {
+    /*
+     * Create a channel emitting the given query fasta file(s).
+     * Split the file into chunks containing as many sequences as defined by the parameter 'chunkSize'.
+     * Finally, assign the resulting channel to the variable 'ch_fasta'
+     */
+    Channel
+        .fromPath(params.query)
+        .splitFasta(size: chunk_size, file:true) // by: chunk_size
+        .set { ch_fasta }
+    
+
+    /*
+     * Prepare Diamond database
+
+     if (params.blastTask =~ /D$/ && params.outfmtString =~ /staxids|sscinames|scomnames|sskingdoms/ && !file("${params.db}.dmnd").exists()){
+        ch_fasta_db = file("${db_dir}/${db_name}.fasta").exists() ? "${db_dir}/${db_name}.fasta" : extract_db_fasta(db_dir)
+        diamond_db_ch = diamond_prep_db(db_dir, ch_fasta_db, "${tax_db_dir}/prot.accession2taxid.FULL.gz", "${tax_db_dir}/names.dmp", "${tax_db_dir}/nodes.dmp")
+    }
+    */    
+    if (params.blastTask =~ /D$/  && params.outfmtString =~ /staxids|sscinames|sphylums|skingdoms/) {
+        if (!file("${db_dir}/${db_basename}.dmnd").exists()  ) {
+            ch_fasta_db = file("${db_dir}/${db_basename}.fasta").exists() ? "${db_dir}/${db_basename}.fasta" : extract_db_fasta(db_dir)
+            diamond_db_ch = diamond_prep_db(db_dir, ch_fasta_db, "${params.tax_db_dir}/prot.accession2taxid.FULL.gz", "${params.tax_db_dir}/names.dmp", "${params.tax_db_dir}/nodes.dmp")
+            //db_name = file(diamond_db_ch.out).name  // "${db_name}.dmnd"
+        } 
+        // db_path = "${db_dir}/${db_basename}.dmnd"
+        db_name = "${db_basename}.dmnd"
+        // print $db_name
+    } 
+    
+    
+    /*
+    if (params.blastTask =~ /D$/ ){
+        if (params.outfmtString =~ /staxids|sscinames|sphylums|skingdoms/) {
+            if (file("${params.db}.dmnd").exists() ) {
+            Channel
+                .fromPath("${params.db}.dmnd")
+                .set { diamond_db_ch }
+            } else {
+                ch_fasta_db = file("${db_dir}/${db_name}.fasta").exists() ? "${db_dir}/${db_name}.fasta" : extract_db_fasta(db_dir)
+                diamond_db_ch = diamond_prep_db(db_dir, ch_fasta_db, "${tax_db_dir}/prot.accession2taxid.FULL.gz", "${tax_db_dir}/names.dmp", "${tax_db_dir}/nodes.dmp")
+            }    
+        } else {
+            Channel
+                .fromPath("${db_dir}/${db_name}")
+                .set { diamond_db_ch }
+        }
+    }
+    */
+    /*
+     * Execute a BLAST job for each chunk emitted by the 'ch_fasta' channel
+     * and emit the resulting BLAST matches.
+     */
+
+    if (params.blastTask=='blastp') { 
+        ch_hits = blastp(ch_fasta, db_dir)
+    } else if (params.blastTask=='blastx') {
+        ch_hits = blastx(ch_fasta, db_dir)
+    } else if (params.blastTask=='blastn') {
+        ch_hits = blastn(ch_fasta, db_dir)
+    } else if (params.blastTask=='blastxD') {
+        ch_hits = diamond_blastx(ch_fasta, db_dir)
+    } else if (params.blastTask=='blastpD') {
+        ch_hits = diamond_blastp(ch_fasta, db_dir)
+    }
+    
+
+    ch_hits
+        .collectFile(name: res_name, storeDir: out_dir )
+       
+    // the short way
+    // (params.diamondTask=='blastp' ? blastp(ch_fasta, db_dir) : blastx(ch_fasta, db_dir)) | omega
+    /*
+     * Each time a file emitted by the 'blast' process, an extract job is executed,
+     * producing a file containing the matching sequences.
+    
+    ch_sequences = extract(ch_hits, db_dir)
+     */
+    /*
+     * Collect all the sequences files into a single file
+     * and print the resulting file contents when complete.
+     */
+    
+}
+ 
+process blastn {
+    label 'blast'
+
+    input:
+    path 'query.fa' 
+    path db 
+ 
+    output:
+    path 'blastn_results'
+
+    script:
+    """
+    blastn -db $db/$db_name -query query.fa -outfmt ${params.outfmtString} -num_threads ${task.cpus} -evalue ${params.evalue} -max_target_seqs ${params.targetSeqs} ${params.blastOpts} > blastn_results
+    """
+}
+
+
+process blastp {
+    label 'blast'
+
+    input:
+    path 'query.fa' 
+    path db
+ 
+    output:
+    path 'blastp_results'
+
+    script:
+    """
+    blastp -db $db/$db_name -query query.fa -outfmt ${params.outfmtString} -num_threads ${task.cpus} -evalue ${params.evalue} -max_target_seqs ${params.targetSeqs} ${params.blastOpts} > blastp_results
+    """
+} 
+
+process blastx {
+
+    label 'blast'
+
+    input:
+    path 'query.fa' 
+    path db
+ 
+    output:
+    path 'blastx_results'
+
+    script:
+    """
+    blastx -db $db/$db_name -query query.fa -outfmt ${params.outfmtString} -num_threads ${task.cpus} -evalue ${params.evalue} -max_target_seqs ${params.targetSeqs} ${params.blastOpts} > blastx_results
+    """
+} 
+
+/*
+For diamond blast jobs, check if the database exists.
+It can be either ${params.db}.acc file for NCBI ones (does not support taxonomy yet!) or ${params.db}.dmnd for Diamond databases (which support taxonomy)
+*/
+
+process extract_db_fasta {
+    label 'blast'
+
+    input:
+    path db_dir 
+    // path db_name 
+
+    output:
+    path "${db_name}.fasta", emit: db_fasta 
+
+    """
+    blastdbcmd -entry all -db ${db_dir}/${db_name} -out ${db_name}.fasta
+    """
+
+}
+
+process diamond_prep_db {
+    label 'diamond'
+
+    input:
+    path db_dir
+    path fasta // from "${db_name}.fasta"
+    path acc2tax // from "${tax_db_dir}/prot.accession2taxid.FULL.gz"
+    path names // from "${tax_db_dir}/names.dmp"
+    path nodes // from "${tax_db_dir}/nodes.dmp"
+
+    output:
+    path "${db_dir}/${db_name}.dmnd"  
+
+    script:
+    """
+    diamond makedb -p ${task.cpus} --in $fasta -d ${db_dir}/${db_name} --taxonmap ${acc2tax} --taxonnodes ${nodes} --taxonnames ${names}
+    """
+
+}
+process diamond_blastp {
+    label 'diamond'
+
+    input:
+    path 'query.fa' // from ch_fasta
+    path db //from diamond_db_ch
+    // val dbname
+ 
+    output:
+    path 'diamond_blastp_results'
+
+    script:
+    """
+    diamond blastp -d $db/$db_name -q query.fa -f ${params.outfmtString} -p ${task.cpus} ${params.diamondOpts} -o diamond_blastp_results
+    """
+} 
+
+process diamond_blastx {
+    label 'diamond'
+ //   label 'mc_medium'
+
+    input:
+    path 'query.fa' // from ch_fasta
+    path db // from diamond_db_ch
+    // val dbname
+ 
+    output:
+    path 'diamond_blastx_results'
+
+    script:
+    """
+    diamond blastx -d $db/$db_name -q query.fa -f ${params.outfmtString} -p ${task.cpus} ${params.diamondOpts} -o diamond_blastx_results
+    """
+} 
+
+
+ 
+ /*
+process extract {
+    input:
+    path 'top_hits'
+    path db
+ 
+    output:
+    path 'sequences'
+ 
+    """
+    blastdbcmd -db $db/$db_name -entry_batch top_hits | head -n 10 > sequences
+    """
+}
+*/
+

@@ -1,0 +1,1 @@
+/home/ibar/adna/tools/nf-blast/nf-blast.nf
